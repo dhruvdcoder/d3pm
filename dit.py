@@ -72,9 +72,20 @@ class LabelEmbedder(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, n_heads):
-        super().__init__()
+    """Relative positional attention with rotary embeddings."""
 
+    def __init__(self, dim: int, n_heads: int):
+        """
+        Args:
+            dim: int
+                Toal hidden dim including all heads
+            n_heads: int
+                Number of heads
+
+        Note:
+            The sum of per-head hidden dim is equal to dim
+        """
+        super().__init__()
         self.n_heads = n_heads
         self.n_rep = 1
         self.head_dim = dim // n_heads
@@ -88,16 +99,32 @@ class Attention(nn.Module):
         self.k_norm = nn.LayerNorm(self.n_heads * self.head_dim)
 
     @staticmethod
-    def reshape_for_broadcast(freqs_cis, x):
+    def reshape_for_broadcast(freqs_cis: torch.Tensor, x):
+        """
+        Prepare freqs_cis for element-wise multiplication with x by broadcasting.
+
+        Args:
+            freqs_cis: A complex tensor $\cos(\omega) + i \sin(\omega)$. of shape (seq_len, d/2)
+            x: A tensor (mostly complex but not required) of shape (bsz, seq_len, *, d/2)
+        """
         ndim = x.ndim
+        # TODO: why is 0 <=1 present?
         assert 0 <= 1 < ndim
         assert freqs_cis.shape == (x.shape[1], x.shape[-1])
-        shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
+        # Assuming that x has shape (bsz, seq_len, ..., d/2)
+        # We need to add dims for bsz and ... in  (bsz, seq_len, ..., d/2)
+        # we need to keep seq_len dim and the hidden_dim as it is to match x
+        # for other dims we need to add a dim with size 1
+        shape = [
+            d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)
+        ]
         return freqs_cis.view(*shape)
 
     @staticmethod
     def apply_rotary_emb(xq, xk, freqs_cis):
-        xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+        xq_ = torch.view_as_complex(
+            xq.float().reshape(*xq.shape[:-1], -1, 2)
+        )  # (bsz, seq_len, n_heads, head_dim/2)
         xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
         freqs_cis = Attention.reshape_for_broadcast(freqs_cis, xq_)
         xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
@@ -137,7 +164,9 @@ class FeedForward(nn.Module):
         hidden_dim = int(2 * hidden_dim / 3)
         if ffn_dim_multiplier:
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
-        hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
+        hidden_dim = multiple_of * (
+            (hidden_dim + multiple_of - 1) // multiple_of
+        )
 
         self.w1 = nn.Linear(dim, hidden_dim, bias=False)
         self.w2 = nn.Linear(hidden_dim, dim, bias=False)
@@ -151,6 +180,8 @@ class FeedForward(nn.Module):
 
 
 class TransformerBlock(nn.Module):
+    """Transformer block with AdaLN."""
+
     def __init__(
         self,
         layer_id,
@@ -186,7 +217,8 @@ class TransformerBlock(nn.Module):
             )
 
             x = x + gate_msa.unsqueeze(1) * self.attention(
-                modulate(self.attention_norm(x), shift_msa, scale_msa), freqs_cis
+                modulate(self.attention_norm(x), shift_msa, scale_msa),
+                freqs_cis,
             )
             x = x + gate_mlp.unsqueeze(1) * self.feed_forward(
                 modulate(self.ffn_norm(x), shift_mlp, scale_mlp)
@@ -201,7 +233,9 @@ class TransformerBlock(nn.Module):
 class FinalLayer(nn.Module):
     def __init__(self, hidden_size, patch_size, out_channels):
         super().__init__()
-        self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.norm_final = nn.LayerNorm(
+            hidden_size, elementwise_affine=False, eps=1e-6
+        )
         self.linear = nn.Linear(
             hidden_size, patch_size * patch_size * out_channels, bias=True
         )
@@ -233,6 +267,25 @@ class DDiT_Llama(nn.Module):
         norm_eps=1e-5,
         learn_gating=False,
     ):
+        """
+        Args:
+            N: int
+                Number of classes
+            dim: int
+                Dimension of the model
+            n_layers: int
+                Number of layers
+            n_heads: int
+                Number of heads
+            multiple_of: int
+                Multiple of
+            ffn_dim_multiplier: int
+                Feed forward dimension multiplier
+            norm_eps: float
+                Epsilon for layer norm
+            learn_gating: bool
+                Whether to learn gating
+        """
         super().__init__()
         self.N = N
         self.learn_gating = learn_gating
@@ -304,7 +357,9 @@ class DiT_Llama(nn.Module):
         self.patch_size = patch_size
 
         self.init_conv_seq = nn.Sequential(
-            nn.Conv2d(in_channels, dim // 2, kernel_size=5, padding=2, stride=1),
+            nn.Conv2d(
+                in_channels, dim // 2, kernel_size=5, padding=2, stride=1
+            ),
             nn.SiLU(),
             nn.GroupNorm(32, dim // 2),
             nn.Conv2d(dim // 2, dim // 2, kernel_size=5, padding=2, stride=1),
@@ -312,11 +367,15 @@ class DiT_Llama(nn.Module):
             nn.GroupNorm(32, dim // 2),
         )
 
-        self.x_embedder = nn.Linear(patch_size * patch_size * dim // 2, dim, bias=True)
+        self.x_embedder = nn.Linear(
+            patch_size * patch_size * dim // 2, dim, bias=True
+        )
         nn.init.constant_(self.x_embedder.bias, 0)
 
         self.t_embedder = TimestepEmbedder(min(dim, 1024))
-        self.y_embedder = LabelEmbedder(num_classes, min(dim, 1024), class_dropout_prob)
+        self.y_embedder = LabelEmbedder(
+            num_classes, min(dim, 1024), class_dropout_prob
+        )
 
         self.layers = nn.ModuleList(
             [
@@ -395,7 +454,10 @@ class DiT_Llama(nn.Module):
         half = x[: len(x) // 2]
         combined = torch.cat([half, half], dim=0)
         model_out = self.forward(combined, t, y)
-        eps, rest = model_out[:, : self.in_channels], model_out[:, self.in_channels :]
+        eps, rest = (
+            model_out[:, : self.in_channels],
+            model_out[:, self.in_channels :],
+        )
         cond_eps, uncond_eps = torch.split(eps, len(eps) // 2, dim=0)
         half_eps = uncond_eps + cfg_scale * (cond_eps - uncond_eps)
         eps = torch.cat([half_eps, half_eps], dim=0)
@@ -403,7 +465,9 @@ class DiT_Llama(nn.Module):
 
     @staticmethod
     def precompute_freqs_cis(dim, end, theta=10000.0):
-        freqs = 1.0 / (theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim))
+        freqs = 1.0 / (
+            theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
+        )
         t = torch.arange(end)
         freqs = torch.outer(t, freqs).float()
         freqs_cis = torch.polar(torch.ones_like(freqs), freqs)
