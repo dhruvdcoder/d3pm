@@ -317,15 +317,19 @@ class DDiT_Llama(nn.Module):
         x_onehot = torch.nn.functional.one_hot(x, self.N).to(
             x.device, dtype=next(self.parameters()).dtype
         )
-        x = self.embedder(x)
+        x = self.embedder(x)  # shape (bsz, seq_len, dim)
         adaln_input = self.t_embedder(t)
 
         for layer in self.layers:
             x = layer(x, self.freqs_cis[: x.size(1)], adaln_input=adaln_input)
 
-        x = self.final_layer(x, adaln_input)
+        x = self.final_layer(
+            x, adaln_input
+        )  # shape (bsz, seq_len, out_channel)
         if self.learn_gating:
-            x, gate = x.chunk(2, dim=-1)
+            x, gate = x.chunk(
+                2, dim=-1
+            )  # shape x: (bsz, seq_len, N), gate: (bsz, seq_len, N)
             return x + x_onehot * (1 + gate).abs()
         else:
             return x + x_onehot
@@ -465,6 +469,7 @@ class DiT_Llama(nn.Module):
 
     @staticmethod
     def precompute_freqs_cis(dim, end, theta=10000.0):
+        # this line can be reused in timestep embedder.
         freqs = 1.0 / (
             theta ** (torch.arange(0, dim, 2)[: (dim // 2)].float() / dim)
         )
